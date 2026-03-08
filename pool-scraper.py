@@ -1,7 +1,7 @@
-from bs4 import BeautifulSoup
+from bs4 import BeautifulSoup, Tag
 from utils import *
 import requests
-import time
+import json
 import re
 from datetime import datetime, timezone, timedelta
 
@@ -25,8 +25,19 @@ class PoolMyFingerScraper:
     def __init__(self):
         self.db_handler = PoolMyFingerDB()
 
-    def get_link(self, type : str, page : int):
-        return f"{self.POOLS_URL}{type}&page={page}"
+    def get_link(self, pool_type : PoolType, page : int = 1):
+        """
+        Provides the pools link using `mtl_content.lieux.installation.code` search param
+        and adding the type and page too
+
+        Args:
+            type (str): The type of pools like PISI
+            page (int): The page number requested (default: 1)
+        
+        Returns:
+            str: The link with all the right search params
+        """
+        return f"{self.POOLS_URL}{str(pool_type)}&page={page}"
 
     def get_webpage(self, url: str) -> bytes:
         """
@@ -67,11 +78,51 @@ class PoolMyFingerScraper:
         self.db_handler.store_site(url, res.content)
         return res.content
 
-    def get_pools(self):
+    def get_pool_links(self, pool_type : PoolType, pages : int) -> list[Pool]:
+        places = []
+        logger.info(f"Fetching pool links for type '{pool_type}' across {pages} page(s)")
+        for page_num in range(1, pages + 1):
+            url = self.get_link(pool_type, page_num)
+            logger.info(f"Processing page {page_num}/{pages}: {url}")
+            page = self.get_webpage(url)
+            page_soup = BeautifulSoup(page, "html.parser")
+
+            map_el = page_soup.select_one("div[data-map-map]")
+            if (map_el and isinstance(map_el, Tag)):
+                data = json.loads(str(map_el["data-map-map"]))
+                features = data["coordinates"]["features"]
+                logger.debug(f"Found {len(features)} feature(s) on page {page_num}")
+
+                for feature in features:
+                    lon, lat = feature["geometry"]["coordinates"]
+
+                    desc_html = feature["properties"]["description"]
+                    desc = BeautifulSoup(desc_html, "html.parser")
+
+                    a = desc.select_one("a.link-list-element")
+                    if a is None:
+                        logger.warning(f"No link element found for feature at ({lat}, {lon}), skipping")
+                        continue
+                    name = a.get_text(strip=True)
+                    slug = a["href"]
+
+                    logger.debug(f"Found pool: {name} ({slug})")
+                    places.append(Pool(
+                        name,
+                        f"https://montreal.ca{slug}",
+                        f"{lat}:{lon}",
+                    ))
+            else:
+                logger.warning(f"No map element found on page {page_num} for type '{pool_type}'")
+
+        logger.info(f"Collected {len(places)} pool(s) for type '{pool_type}'")
+        return places
+
+    def populate_pools(self, pools : list[Pool]):
         pass
 
-    def get_pages_for_tag(self, tag : str) -> int:
-        tag_link = self.get_link(tag, 1)
+    def get_pages_for_tag(self, pool_type : PoolType) -> int:
+        tag_link = self.get_link(pool_type)
         content = self.get_webpage(tag_link)
         soup = BeautifulSoup(content, features="html.parser")
         results_element = soup.select_one(self.RESULTS_SELECTOR)
@@ -83,11 +134,14 @@ class PoolMyFingerScraper:
                 total_results = int(match.group(1))
                 # Assuming 100 results per page
                 pages = (total_results + 99) // 100  # Ceiling division
-                logger.info(f"Tag '{tag}': {total_results} results across {pages} page(s)")
+                logger.info(f"Tag '{pool_type}': {total_results} results across {pages} page(s)")
                 return pages
 
-        logger.warning(f"Could not find results count for tag '{tag}'")
+        logger.warning(f"Could not find results count for tag '{pool_type}'")
         return 0
 
 if __name__ == "__main__":
     scraper = PoolMyFingerScraper()
+    for t in TYPES:
+        page_count = scraper.get_pages_for_tag(t)
+        pools = scraper.get_pool_links(t, page_count)

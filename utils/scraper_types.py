@@ -21,20 +21,26 @@ class _TYPES(dict):
 TYPES = _TYPES()
 
 class PoolType:
-    def __init__(self, name : str, description : str):
+    def __init__(self, name : str = TYPES['PISI'], description : str = ""):
         self.name = name
         self.description = description
+    
+    def __str__(self):
+        for t in TYPES:
+            if self.name == TYPES[t]:
+                return t
+        return self.name
 
 class Pool:
     def __init__(self, 
                  name : str, 
-                 type : PoolType,
                  url  : str,
-                 address: str,
-                 primary_image_url: str,
-                 map_link: str,
                  geo_location: str,
-                 phone: str,
+                 type : PoolType = PoolType(),
+                 address: str = "",
+                 primary_image_url: str = "",
+                 map_link: str = "",
+                 phone: str = "",
                  createdAt: float = time.time(),
                  is_active: bool = True,
                  schedules: list = []):
