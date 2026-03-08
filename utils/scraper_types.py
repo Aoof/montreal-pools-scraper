@@ -36,16 +36,16 @@ class Pool:
                  name : str, 
                  url  : str,
                  geo_location: str,
-                 type : PoolType = PoolType(),
+                 pool_type : PoolType = PoolType(),
                  address: str = "",
                  primary_image_url: str = "",
                  map_link: str = "",
                  phone: str = "",
-                 createdAt: float = time.time(),
                  is_active: bool = True,
-                 schedules: list = []):
+                 schedules: list = [],
+                 createdAt: float = time.time()):
         self.name = name
-        self.type = type
+        self.pool_type = pool_type
         self.url = url
         self.address = address
         self.primary_image_url = primary_image_url

@@ -22,8 +22,11 @@ class PoolMyFingerScraper:
     }
     POOLS_URL = "https://montreal.ca/en/places?mtl_content.lieux.installation.code="
 
+    pools : list[Pool]
+
     def __init__(self):
         self.db_handler = PoolMyFingerDB()
+        self.pools = []
 
     def get_link(self, pool_type : PoolType, page : int = 1):
         """
@@ -78,8 +81,7 @@ class PoolMyFingerScraper:
         self.db_handler.store_site(url, res.content)
         return res.content
 
-    def get_pool_links(self, pool_type : PoolType, pages : int) -> list[Pool]:
-        places = []
+    def get_pools(self, pool_type : PoolType, pages : int) -> list[Pool]:
         logger.info(f"Fetching pool links for type '{pool_type}' across {pages} page(s)")
         for page_num in range(1, pages + 1):
             url = self.get_link(pool_type, page_num)
@@ -107,19 +109,37 @@ class PoolMyFingerScraper:
                     slug = a["href"]
 
                     logger.debug(f"Found pool: {name} ({slug})")
-                    places.append(Pool(
-                        name,
-                        f"https://montreal.ca{slug}",
-                        f"{lat}:{lon}",
+                    self.pools.append(Pool(
+                        name         = name,
+                        url          = f"https://montreal.ca{slug}",
+                        geo_location = f"{lat}:{lon}",
+                        pool_type    = pool_type
                     ))
             else:
                 logger.warning(f"No map element found on page {page_num} for type '{pool_type}'")
 
-        logger.info(f"Collected {len(places)} pool(s) for type '{pool_type}'")
-        return places
+        logger.info(f"Collected {len(self.pools)} pool(s) for type '{pool_type}'")
+        return self.pools
 
-    def populate_pools(self, pools : list[Pool]):
-        pass
+    def populate_pools(self):
+        for pool in self.pools:
+            content = self.get_webpage(pool.url)
+            pool_soup = BeautifulSoup(content)
+
+            # We got the following info 
+            # pool.name
+            # pool.url
+            # pool.geo_location
+            # pool.pool_type
+            # Missing the following info
+            # pool.address: str = "",
+            # pool.primary_image_url: str = "",
+            # pool.map_link: str = "",
+            # pool.phone: str = "",
+            # pool.createdAt: float = time.time(),
+            # pool.is_active: bool = True,
+            # pool.schedules: list[Unknown] = []
+            # This is gonna be difficult... We need to take into account every possibility, but also we must see every possibility
 
     def get_pages_for_tag(self, pool_type : PoolType) -> int:
         tag_link = self.get_link(pool_type)
@@ -144,4 +164,4 @@ if __name__ == "__main__":
     scraper = PoolMyFingerScraper()
     for t in TYPES:
         page_count = scraper.get_pages_for_tag(t)
-        pools = scraper.get_pool_links(t, page_count)
+        pools = scraper.get_pools(t, page_count)
