@@ -131,6 +131,7 @@ class PoolMyFingerScraper:
             # pool.url
             # pool.geo_location
             # pool.pool_type
+
             # Missing the following info
             # pool.address: str = "",
             # pool.primary_image_url: str = "",

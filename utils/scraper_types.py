@@ -39,7 +39,6 @@ class Pool:
                  pool_type : PoolType = PoolType(),
                  address: str = "",
                  primary_image_url: str = "",
-                 map_link: str = "",
                  phone: str = "",
                  is_active: bool = True,
                  schedules: list = [],
@@ -49,7 +48,9 @@ class Pool:
         self.url = url
         self.address = address
         self.primary_image_url = primary_image_url
-        self.map_link = map_link
+        geo_array = geo_location.split(":")
+        if (geo_array != 2): raise Exception("Bad geographic data provided") 
+        self.map_link = f"https://www.openstreetmap.org/?lat={geo_array[0]}&lon={geo_array[1]}&zoom=15"
         self.geo_location = geo_location
         self.phone = phone
         self.createdAt = createdAt
