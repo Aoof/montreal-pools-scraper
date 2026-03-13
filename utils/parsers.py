@@ -72,92 +72,176 @@ class Variant1Parser(ScheduleVariantParser):
         return bool(soup.find("section", id="HRS0"))
 
     def parse(self, soup: BeautifulSoup) -> list[Schedule]:
-        raw_section = soup.find("section", id="HRS0")
-        if raw_section is None or isinstance(raw_section, Tag):
+        section = soup.select_one("section#HRS0")
+        if section is None or not isinstance(section, Tag):
             return []
-        section = cast(Tag, raw_section)
 
         schedules: list[Schedule] = []
 
-        # Activity name from the section heading
+        # activity name
         raw_h2 = section.find("h2")
         activity_name = _text(raw_h2) if isinstance(raw_h2, Tag) else "swimming"
 
-        for wrapper in section.select(".wrapper.wrapper-complex"):
-            # --- date range ---
-            time_tags = wrapper.select(".wrapper-header time[datetime]")
-            if len(time_tags) >= 2:
-                eff = _text(time_tags[0]).replace("\u00a0", " ").strip()
-                end = _text(time_tags[1]).replace("\u00a0", " ").strip()
-            elif len(time_tags) == 1:
-                eff = end = _text(time_tags[0]).replace("\u00a0", " ").strip()
-            else:
-                eff = end = ""
+        # correct container
+        container = section.select_one(".content-module-stacked")
+        if not isinstance(container, Tag):
+            return []
 
-            # --- one sub-schedule per audience group (h3 + table) ---
-            raw_body = wrapper.find(class_="wrapper-body")
-            if not isinstance(raw_body, Tag):
+        wrappers = container.select(".wrapper.wrapper-complex")
+
+        for wrapper in wrappers:
+
+            header = wrapper.select_one(".wrapper-header .font-weight-bold")
+            period_label = _text(header) if isinstance(header, Tag) else ""
+
+            body = wrapper.select_one(".wrapper-body")
+            if not isinstance(body, Tag):
                 continue
-            body = raw_body
 
-            for stacked in body.find_all("div", class_="content-module-stacked", recursive=False):
-                if not isinstance(stacked, Tag):
-                    continue
+            stacked_groups = body.select(".content-module-stacked")
+
+            for stacked in stacked_groups:
 
                 raw_h3 = stacked.find("h3")
-                audience_label = _text(raw_h3) if isinstance(raw_h3, Tag) else activity_name
+                audience = _text(raw_h3) if isinstance(raw_h3, Tag) else activity_name
 
-                for table in stacked.find_all("table"):
-                    if not isinstance(table, Tag):
-                        continue
+                tables = stacked.find_all("table")
+
+                for table in tables:
                     blocks = self._parse_table(table)
+
                     if blocks:
-                        schedules.append(Schedule(
-                            time_blocks=blocks,
-                            effective_date=eff,
-                            end_date=end,
-                            activity=audience_label,
-                        ))
+                        schedules.append(
+                            Schedule(
+                                activity=audience,
+                                effective_date=period_label,
+                                end_date="",
+                                time_blocks=blocks,
+                            )
+                        )
 
         return schedules
 
     @staticmethod
     def _parse_table(table: Tag) -> list[TimeBlock]:
+
         blocks: list[TimeBlock] = []
+
         for tr in table.select("tbody tr"):
+
             cells = tr.find_all("td")
             if len(cells) < 2:
                 continue
 
-            cell0 = cells[0]
-            cell1 = cells[1]
-            if not isinstance(cell0, Tag) or not isinstance(cell1, Tag):
-                continue
-
-            day = _text(cell0)
+            day = _text(cells[0])
             if day.lower() not in WEEKDAYS:
                 continue
 
-            # A cell may contain multiple time-slot divs (e.g. two sessions on same day)
-            slot_divs = cell1.find_all("div", recursive=False)
-            raw_slots: list[str] = (
-                [_text(d) for d in slot_divs if isinstance(d, Tag)]
-                if slot_divs
-                else [_text(cell1)]
-            )
+            text = _text(cells[1])
 
-            for raw in raw_slots:
-                if "closed" in raw.lower():
-                    continue
-                times = list(_TIME_RE.finditer(raw))
-                if len(times) >= 2:
-                    start = _parse_time(times[0].group(0))
-                    end_t = _parse_time(times[1].group(0))
-                    if start is not None and end_t is not None:
-                        blocks.append(TimeBlock(day=day, start=start, end=end_t))
+            if "closed" in text.lower():
+                continue
+
+            times = list(_TIME_RE.finditer(text))
+
+            if len(times) >= 2:
+                start = _parse_time(times[0].group(0))
+                end = _parse_time(times[1].group(0))
+
+                if start and end:
+                    blocks.append(
+                        TimeBlock(
+                            day=day,
+                            start=start,
+                            end=end,
+                        )
+                    )
 
         return blocks
 
+# ---------------------------------------------------------------------------
+# VARIANT 2 -- div#section-horaire  (regular weekly opening hours)
+# ---------------------------------------------------------------------------
+
+class Variant2Parser(ScheduleVariantParser):
+    """
+    Matches pages that contain a <div id="section-horaire"> block.
+
+    Structure:
+      div#section-horaire
+        h2                         -> "Opening hours"
+        .list-item-icon-label      -> schedule label (e.g. "Regular schedule")
+        ul
+          li.row
+            .schedule-day          -> weekday
+            .schedule-data         -> "8:00 am to 9:00 pm"
+
+    Produces a single schedule with weekly recurring hours.
+    """
+
+    def can_parse(self, soup: BeautifulSoup) -> bool:
+        return bool(soup.find("div", id="section-horaire"))
+
+    def parse(self, soup: BeautifulSoup) -> list[Schedule]:
+
+        section = soup.select_one("#section-horaire")
+        if not isinstance(section, Tag):
+            return []
+
+        schedules: list[Schedule] = []
+
+        label_tag = section.select_one(".list-item-icon-label")
+        activity_name = _text(label_tag) if isinstance(label_tag, Tag) else "Opening hours"
+
+        blocks: list[TimeBlock] = []
+
+        rows = section.select("ul li.row")
+
+        for row in rows:
+
+            day_tag = row.select_one(".schedule-day")
+            data_tag = row.select_one(".schedule-data")
+
+            if not isinstance(day_tag, Tag) or not isinstance(data_tag, Tag):
+                continue
+
+            day = _text(day_tag)
+
+            if day.lower() not in WEEKDAYS:
+                continue
+
+            text = _text(data_tag)
+
+            if "closed" in text.lower():
+                continue
+
+            times = list(_TIME_RE.finditer(text))
+
+            if len(times) >= 2:
+
+                start = _parse_time(times[0].group(0))
+                end = _parse_time(times[1].group(0))
+
+                if start and end:
+                    blocks.append(
+                        TimeBlock(
+                            day=day,
+                            start=start,
+                            end=end,
+                        )
+                    )
+
+        if blocks:
+            schedules.append(
+                Schedule(
+                    activity=activity_name,
+                    effective_date="",
+                    end_date="",
+                    time_blocks=blocks,
+                )
+            )
+
+        return schedules
 
 # ---------------------------------------------------------------------------
 # Registry -- add new variant parser instances here
@@ -165,6 +249,7 @@ class Variant1Parser(ScheduleVariantParser):
 
 VARIANT_PARSERS: list[ScheduleVariantParser] = [
     Variant1Parser(),
+    Variant2Parser(),
 ]
 
 # ---------------------------------------------------------------------------
