@@ -2,6 +2,62 @@
 
 A scraper for Montreal's public pool listings from `montreal.ca`, with a MySQL-backed HTML cache and structured pool data models.
 
+## Prerequisites
+
+- Python 3.8 or higher
+- MySQL server running on port 3306 locally
+- A MySQL database named 'test_pools_app' (for development) or 'pools_app' (for production)
+- Copy `.env.example` to `.env` and fill in your database credentials
+- Install Python dependencies: `pip install -r requirements.txt`
+
+## CLI Usage
+
+The scraper now supports command-line arguments for logging and selective info extraction:
+
+```bash
+python pool-scraper.py [options]
+```
+
+### Common examples
+
+```bash
+# Scrape all types with default behavior (all details)
+python pool-scraper.py
+
+# Only indoor and outdoor pools, max 2 pages each, debug logs to console
+python pool-scraper.py --types PISI PIEX --max-pages 2 --log-level DEBUG
+
+# Listing-only scrape (no detail pages)
+python pool-scraper.py --skip-details
+
+# Extract only schedules and phone, then export JSON
+python pool-scraper.py --extract schedules phone --output-json data/pools.json --pretty-json
+
+# Quiet console output
+python pool-scraper.py --quiet
+```
+
+### Flags
+
+- `--types {PISI,PIEX,PATA,JEUD} [...]`:
+	choose one or more pool categories (default: all)
+- `--max-pages N`:
+	limit listing pages fetched per selected type
+- `--workers N`:
+	concurrent workers for detail pages (default: `10`)
+- `--skip-details`:
+	only collect listing-level fields (`name`, `url`, `geo_location`, etc.)
+- `--extract {all,address,phone,image,schedules} [...]`:
+	choose which detail fields to extract (default: `all`)
+- `--output-json PATH`:
+	write scraped pools to a JSON file
+- `--pretty-json`:
+	pretty-print JSON output when used with `--output-json`
+- `--log-level {DEBUG,INFO,WARNING,ERROR,CRITICAL}`:
+	set console verbosity (default: `INFO`)
+- `--quiet`:
+	suppress most console logs
+
 ## Notes
 
 ### Types & Models

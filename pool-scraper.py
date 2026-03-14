@@ -1,10 +1,14 @@
 from __future__ import annotations
 
+import argparse
 import json
+import logging
 import re
 import threading
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
+from typing import Any
 
 import requests
 from bs4 import BeautifulSoup, Tag
@@ -144,33 +148,38 @@ class PoolMyFingerScraper:
     # Second pass: populate detail fields
     # ------------------------------------------------------------------
 
-    def _populate_one(self, pool: Pool) -> None:
+    def _populate_one(self, pool: Pool, extract_fields: set[str]) -> None:
         """Fetch a single pool's detail page and fill in all fields."""
         logger.info(f"Populating pool: {pool.name} ({pool.url})")
         try:
             content = self.get_webpage(pool.url)
             pool_soup = BeautifulSoup(content, "html.parser")
 
-            pool.address = PoolDetailParser.parse_address(pool_soup)
-            pool.phone = PoolDetailParser.parse_phone(pool_soup)
-            pool.primary_image_url = PoolDetailParser.parse_primary_image_url(pool_soup)
+            if "address" in extract_fields:
+                pool.address = PoolDetailParser.parse_address(pool_soup)
+            if "phone" in extract_fields:
+                pool.phone = PoolDetailParser.parse_phone(pool_soup)
+            if "image" in extract_fields:
+                pool.primary_image_url = PoolDetailParser.parse_primary_image_url(pool_soup)
 
-            schedules = PoolDetailParser.parse_schedules(pool_soup)
-            if schedules:
-                pool.schedules = schedules
-                pool.is_active = True
-                logger.info(
-                    f"  -> {len(schedules)} schedule(s) found, pool is active"
-                )
-            else:
-                pool.is_active = False
-                logger.info("  -> No schedules found, pool marked inactive")
+            if "schedules" in extract_fields:
+                schedules = PoolDetailParser.parse_schedules(pool_soup)
+                if schedules:
+                    pool.schedules = schedules
+                    pool.is_active = True
+                    logger.info(
+                        f"  -> {len(schedules)} schedule(s) found, pool is active"
+                    )
+                else:
+                    pool.is_active = False
+                    logger.info("  -> No schedules found, pool marked inactive")
 
         except Exception as exc:
             logger.error(f"Failed to populate pool '{pool.name}': {exc}")
-            pool.is_active = False
+            if "schedules" in extract_fields:
+                pool.is_active = False
 
-    def populate_pools(self, max_workers: int = 10) -> None:
+    def populate_pools(self, max_workers: int = 10, extract_fields: set[str] | None = None) -> None:
         """
         SECOND PASS — concurrently fetch each pool's detail page and fill in:
           - address, phone, primary_image_url
@@ -180,12 +189,18 @@ class PoolMyFingerScraper:
         Args:
             max_workers: Maximum number of parallel threads (default: 10).
         """
+        fields = extract_fields if extract_fields is not None else {
+            "address",
+            "phone",
+            "image",
+            "schedules",
+        }
         logger.info(
             f"Populating {len(self.pools)} pool(s) with up to {max_workers} workers"
         )
         with ThreadPoolExecutor(max_workers=max_workers) as executor:
             futures = {
-                executor.submit(self._populate_one, pool): pool
+                executor.submit(self._populate_one, pool, fields): pool
                 for pool in self.pools
             }
             for future in as_completed(futures):
@@ -217,10 +232,162 @@ class PoolMyFingerScraper:
         return 0
 
 
+def _parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(
+        description=(
+            "Scrape Montreal pool listings, with optional detail extraction and JSON export."
+        )
+    )
+
+    parser.add_argument(
+        "--types",
+        nargs="+",
+        choices=list(TYPES),
+        default=list(TYPES),
+        help="Pool type code(s) to scrape. Defaults to all.",
+    )
+    parser.add_argument(
+        "--max-pages",
+        type=int,
+        default=None,
+        help="Limit pages fetched per selected type.",
+    )
+    parser.add_argument(
+        "--workers",
+        type=int,
+        default=10,
+        help="Maximum worker threads for detail-page scraping (default: 10).",
+    )
+    parser.add_argument(
+        "--skip-details",
+        action="store_true",
+        help="Only scrape listing pages (name/url/location/type), skip detail pages.",
+    )
+    parser.add_argument(
+        "--extract",
+        nargs="+",
+        choices=["all", "address", "phone", "image", "schedules"],
+        default=["all"],
+        help=(
+            "Detail fields to extract when detail scraping is enabled. "
+            "Default: all."
+        ),
+    )
+    parser.add_argument(
+        "--output-json",
+        type=Path,
+        default=None,
+        help="Write scraped data to a JSON file.",
+    )
+    parser.add_argument(
+        "--pretty-json",
+        action="store_true",
+        help="Pretty-print JSON output (used with --output-json).",
+    )
+    parser.add_argument(
+        "--log-level",
+        choices=["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"],
+        default="INFO",
+        help="Console log level for scraper-related loggers (default: INFO).",
+    )
+    parser.add_argument(
+        "--quiet",
+        action="store_true",
+        help="Suppress console logs (equivalent to --log-level CRITICAL).",
+    )
+
+    args = parser.parse_args()
+
+    if args.max_pages is not None and args.max_pages < 1:
+        parser.error("--max-pages must be >= 1")
+    if args.workers < 1:
+        parser.error("--workers must be >= 1")
+
+    return args
+
+
+def _configure_logging(level: str, quiet: bool) -> None:
+    configured_level = logging.CRITICAL if quiet else getattr(logging, level)
+    for logger_name in ("scraper", "db_controller"):
+        target = logging.getLogger(logger_name)
+        for handler in target.handlers:
+            if isinstance(handler, logging.StreamHandler) and not isinstance(
+                handler, logging.FileHandler
+            ):
+                handler.setLevel(configured_level)
+
+
+def _resolve_extract_fields(raw_extract: list[str]) -> set[str]:
+    all_fields = {"address", "phone", "image", "schedules"}
+    if "all" in raw_extract:
+        return all_fields
+    return set(raw_extract)
+
+
+def _schedule_to_dict(schedule: Schedule) -> dict[str, Any]:
+    return {
+        "effective_date": schedule.effective_date,
+        "end_date": schedule.end_date,
+        "activity": schedule.activity,
+        "time_blocks": [
+            {
+                "day": block.day,
+                "start": block.start.strftime("%H:%M"),
+                "end": block.end.strftime("%H:%M"),
+                "label": block.label,
+            }
+            for block in schedule.time_blocks
+        ],
+    }
+
+
+def _pool_to_dict(pool: Pool) -> dict[str, Any]:
+    return {
+        "name": pool.name,
+        "pool_type": str(pool.pool_type),
+        "pool_type_name": pool.pool_type.name,
+        "url": pool.url,
+        "address": pool.address,
+        "primary_image_url": pool.primary_image_url,
+        "map_link": pool.map_link,
+        "geo_location": pool.geo_location,
+        "phone": pool.phone,
+        "created_at": pool.createdAt,
+        "is_active": pool.is_active,
+        "schedules": [_schedule_to_dict(s) for s in pool.schedules],
+    }
+
+
+def _write_json_output(path: Path, pools: list[Pool], pretty: bool) -> None:
+    payload = {
+        "generated_at": datetime.now(timezone.utc).isoformat(),
+        "pool_count": len(pools),
+        "pools": [_pool_to_dict(pool) for pool in pools],
+    }
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("w", encoding="utf-8") as f:
+        json.dump(payload, f, ensure_ascii=False, indent=2 if pretty else None)
+        f.write("\n")
+    logger.info(f"Wrote JSON output to {path}")
+
+
 if __name__ == "__main__":
+    args = _parse_args()
+    _configure_logging(args.log_level, args.quiet)
+
+    extract_fields = _resolve_extract_fields(args.extract)
     scraper = PoolMyFingerScraper()
-    for type_key in TYPES:
+
+    for type_key in args.types:
         pool_type = PoolType(TYPES[type_key])
         page_count = scraper.get_pages_for_tag(pool_type)
+        if args.max_pages is not None:
+            page_count = min(page_count, args.max_pages)
         scraper.get_pools(pool_type, page_count)
-    scraper.populate_pools()
+
+    if not args.skip_details:
+        scraper.populate_pools(max_workers=args.workers, extract_fields=extract_fields)
+
+    if args.output_json is not None:
+        _write_json_output(args.output_json, scraper.pools, args.pretty_json)
