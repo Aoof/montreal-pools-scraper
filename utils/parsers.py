@@ -143,19 +143,22 @@ class Variant1Parser(ScheduleVariantParser):
                 continue
 
             times = list(_TIME_RE.finditer(text))
+            time_counts = len(times) // 2
 
-            if len(times) >= 2:
-                start = _parse_time(times[0].group(0))
-                end = _parse_time(times[1].group(0))
+            if time_counts >= 2 and len(times) % 2 == 0:
+                for i in range(time_counts):
+                    pair = times[i:i+2] 
+                    start = _parse_time(pair[0].group(0))
+                    end = _parse_time(pair[1].group(0))
 
-                if start and end:
-                    blocks.append(
-                        TimeBlock(
-                            day=day,
-                            start=start,
-                            end=end,
+                    if start and end:
+                        blocks.append(
+                            TimeBlock(
+                                day=day,
+                                start=start,
+                                end=end,
+                            )
                         )
-                    )
 
         return blocks
 
