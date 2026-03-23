@@ -325,16 +325,62 @@ def _resolve_extract_fields(raw_extract: list[str]) -> set[str]:
 
 
 def _schedule_to_dict(schedule: Schedule) -> dict[str, Any]:
+    def _parse_date(value: str) -> str | None:
+        if not isinstance(value, str):
+            return None
+        clean = value.replace("\u00a0", " ").strip()
+        if not clean:
+            return None
+        for fmt in ("%Y-%m-%d", "%B %d, %Y", "%b %d, %Y", "%B %d", "%b %d"):
+            try:
+                dt = datetime.strptime(clean, fmt)
+                if "%Y" not in fmt:
+                    dt = dt.replace(year=datetime.now(timezone.utc).year)
+                return dt.strftime("%Y-%m-%d")
+            except ValueError:
+                continue
+        return None
+
+    def _normalize_dates(start_raw: str, end_raw: str) -> tuple[str, str]:
+        start_iso = _parse_date(start_raw)
+        end_iso = _parse_date(end_raw)
+
+        if start_iso and end_iso:
+            return start_iso, end_iso
+
+        joined = (start_raw or "").replace("\u00a0", " ").strip()
+        match = re.search(r"from\s+(.+?)\s+to\s+(.+)", joined, flags=re.IGNORECASE)
+        if match:
+            parsed_start = _parse_date(match.group(1))
+            parsed_end = _parse_date(match.group(2))
+            if parsed_start and parsed_end:
+                return parsed_start, parsed_end
+
+        today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+        if start_iso and not end_iso:
+            return start_iso, start_iso
+        if end_iso and not start_iso:
+            return end_iso, end_iso
+        return today, today
+
+    start_iso, end_iso = _normalize_dates(schedule.effective_date, schedule.end_date)
+
     return {
         "effective_date": schedule.effective_date,
         "end_date": schedule.end_date,
         "activity": schedule.activity,
+        "effective_date_iso": start_iso,
+        "end_date_iso": end_iso,
+        "activity_name": schedule.activity.strip() or "General",
         "time_blocks": [
             {
                 "day": block.day,
                 "start": block.start.strftime("%H:%M"),
                 "end": block.end.strftime("%H:%M"),
                 "label": block.label,
+                "day_of_week": block.day.lower(),
+                "start_time": block.start.strftime("%H:%M"),
+                "end_time": block.end.strftime("%H:%M"),
             }
             for block in schedule.time_blocks
         ],
@@ -342,6 +388,13 @@ def _schedule_to_dict(schedule: Schedule) -> dict[str, Any]:
 
 
 def _pool_to_dict(pool: Pool) -> dict[str, Any]:
+    digits = re.sub(r"\D+", "", pool.phone or "")
+    if len(digits) == 11 and digits.startswith("1"):
+        digits = digits[1:]
+    normalized_phone = (
+        f"{digits[0:3]}-{digits[3:6]}-{digits[6:10]}" if len(digits) == 10 else (digits[:12] or None)
+    )
+
     return {
         "name": pool.name,
         "pool_type": str(pool.pool_type),
@@ -355,6 +408,18 @@ def _pool_to_dict(pool: Pool) -> dict[str, Any]:
         "created_at": pool.createdAt,
         "is_active": pool.is_active,
         "schedules": [_schedule_to_dict(s) for s in pool.schedules],
+        "db_record": {
+            "pool_type_name": (pool.pool_type.name or "Unknown")[:50],
+            "pool_type_description": (str(pool.pool_type) or "")[:255] or None,
+            "name": (pool.name or "Unknown Pool")[:255],
+            "full_address": pool.address or None,
+            "primary_image_url": pool.primary_image_url or None,
+            "website": pool.url or None,
+            "map_link": pool.map_link or None,
+            "phone": normalized_phone,
+            "is_active": 1 if pool.is_active else 0,
+            "schedules": [_schedule_to_dict(s) for s in pool.schedules],
+        },
     }
 
 
