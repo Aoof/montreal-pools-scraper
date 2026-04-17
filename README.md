@@ -35,6 +35,12 @@ python pool-scraper.py --extract schedules phone --output-json data/pools.json -
 
 # Quiet console output
 python pool-scraper.py --quiet
+
+# Dry-run API synchronization (no writes)
+python pool-scraper.py --write-api --dry-run-write --api-username admin --api-password 'secret'
+
+# Write to API (fail-fast on API write errors)
+python pool-scraper.py --write-api --api-username admin --api-password 'secret'
 ```
 
 ### Flags
@@ -57,13 +63,33 @@ python pool-scraper.py --quiet
 	set console verbosity (default: `INFO`)
 - `--quiet`:
 	suppress most console logs
+- `--write-api`:
+	sync scraped pools into the backend API (`POST /pools`, `PATCH /pools/{id}`)
+- `--api-base-url URL`:
+	base URL for backend API (default: `SCRAPER_API_BASE_URL` or local API path)
+- `--api-username USER`:
+	username for API login (default: `SCRAPER_API_USERNAME`)
+- `--api-password PASS`:
+	password for API login (default: `SCRAPER_API_PASSWORD`)
+- `--api-timeout N`:
+	request timeout in seconds for API operations (default: `20`)
+- `--api-retries N`:
+	retry count for transient API/network errors (default: `2`)
+- `--dry-run-write`:
+	compute write decisions without mutating API data
+- `--type-aliases-file PATH`:
+	JSON alias map from scraped type labels/codes to canonical pool type names
+- `--continue-on-api-error`:
+	continue after API write errors (default behavior is fail-fast)
 
 ## Notes
 
 ### Types & Models
-The scraper is built around three core types. `TYPES` is a singleton dict mapping short codes (`PISI`, `PIEX`, `PATA`, `JEUD`) to human-readable category names. `PoolType` wraps one of these categories and serializes back to its code for use in URL params. `Pool` is the main data model, holding everything from name and geo coordinates to schedules — most fields start empty and are meant to be filled in a second pass. `Schedule` is a simple day + time-range value object attached to a pool.
+The scraper is built around three core types. `TYPES` is a singleton dict mapping short codes (`PISI`, `PIEX`, `PATA`, `JEUD`) to human-readable category names. `PoolType` wraps one of these categories and serializes back to its code for use in URL params. `Pool` now supports multiple pool categories (`pool_types`) so a pool discovered on multiple listing pages can be synchronized to many-to-many backend type relationships. `Schedule` is a simple day + time-range value object attached to a pool.
 
 ### Scraping Flow
-The scraper works in two phases. The first phase (implemented) iterates over all pool types, determines the page count by parsing the results header on the listing page, then walks each page extracting pool stubs from the embedded GeoJSON map data (`data-map-map`). Each stub gives a name, URL slug, and coordinates. The second phase (`populate_pools`, not yet implemented) is meant to visit each pool's individual page to fill in the remaining fields: address, phone, primary image, and schedules.
+The scraper works in two phases. The first phase iterates over all pool types, determines the page count by parsing the results header on the listing page, then walks each page extracting pool stubs from the embedded GeoJSON map data (`data-map-map`). Duplicate pools discovered across type pages are merged by URL and collect all discovered pool types. The second phase (`populate_pools`) visits each pool's individual page to fill in the remaining fields: address, phone, primary image, and schedules.
+
+When `--write-api` is enabled, the scraper runs a third synchronization phase through backend endpoints. It resolves canonical type names to backend IDs, skips pools with missing types (strict behavior), and upserts pools via API with `typeIds` so backend code persists associations through `pool_pool_types`.
 
 All HTTP fetching goes through a cache layer backed by MySQL. Raw HTML is stored as chunked `LONGBLOB`s (1 MB/chunk) with a 1-week TTL — fresh content is served from cache; stale or missing entries trigger a real HTTP request and a cache write. This just seems logical especially in development since we'll probably be going through the html many times to understand it.

@@ -117,6 +117,7 @@ class Pool:
     # Class-level annotations so Pylance knows the shape of every instance.
     name: str
     pool_type: PoolType
+    pool_types: list[PoolType]
     url: str
     address: str
     primary_image_url: str
@@ -133,6 +134,7 @@ class Pool:
         url: str,
         geo_location: str,
         pool_type: PoolType | None = None,
+        pool_types: list[PoolType] | None = None,
         address: str = "",
         primary_image_url: str = "",
         phone: str = "",
@@ -147,7 +149,14 @@ class Pool:
             )
 
         self.name = name
-        self.pool_type = pool_type if pool_type is not None else PoolType()
+        resolved_type = pool_type if pool_type is not None else PoolType()
+        self.pool_type = resolved_type
+        self.pool_types = []
+        if pool_types:
+            for candidate in pool_types:
+                self.add_pool_type(candidate)
+        if not self.pool_types:
+            self.pool_types = [resolved_type]
         self.url = url
         self.address = address
         self.primary_image_url = primary_image_url
@@ -160,6 +169,13 @@ class Pool:
         self.createdAt = createdAt if createdAt is not None else datetime.now().timestamp()
         self.is_active = is_active
         self.schedules = schedules if schedules is not None else []
+
+    def add_pool_type(self, pool_type: PoolType) -> None:
+        """Attach a pool type once, keyed by type code where possible."""
+        existing_codes = {str(item).upper() for item in self.pool_types}
+        candidate_code = str(pool_type).upper()
+        if candidate_code not in existing_codes:
+            self.pool_types.append(pool_type)
 
 
 @dataclass

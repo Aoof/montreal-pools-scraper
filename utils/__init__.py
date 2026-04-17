@@ -19,6 +19,7 @@ from .parsers import (
 )
 from .logger import get_logger
 from .db_controller import PoolMyFingerDB
+from .api_client import ScraperApiClient, ApiPoolType
 
 __all__ = [
     # scraper_types
@@ -42,4 +43,7 @@ __all__ = [
     "get_logger",
     # db
     "PoolMyFingerDB",
+    # api
+    "ScraperApiClient",
+    "ApiPoolType",
 ]

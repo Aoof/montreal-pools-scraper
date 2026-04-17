@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import json
 import logging
+import os
 import re
 import threading
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -13,7 +14,13 @@ from typing import Any
 import requests
 from bs4 import BeautifulSoup, Tag
 
-from utils import get_logger, PoolMyFingerDB, ListingPageParser, PoolDetailParser
+from utils import (
+    get_logger,
+    PoolMyFingerDB,
+    ListingPageParser,
+    PoolDetailParser,
+    ScraperApiClient,
+)
 from utils.scraper_types import Pool, PoolType, Schedule, TYPES
 
 logger = get_logger("scraper")
@@ -49,6 +56,7 @@ class PoolMyFingerScraper:
     def __init__(self) -> None:
         self._get_db()  # initialise DB connection for the main thread
         self.pools: list[Pool] = []
+        self._pools_by_url: dict[str, Pool] = {}
 
     # ------------------------------------------------------------------
     # Helpers
@@ -138,11 +146,21 @@ class PoolMyFingerScraper:
             logger.info(f"Processing page {page_num}/{pages}: {url}")
             page = self.get_webpage(url)
             pools_on_page = ListingPageParser.get_pools(page, pool_type)
-            self.pools.extend(pools_on_page)
+            for pool in pools_on_page:
+                self._merge_pool_stub(pool)
             logger.debug(f"Found {len(pools_on_page)} pool(s) on page {page_num}")
 
         logger.info(f"Collected {len(self.pools)} pool(s) for type '{pool_type}'")
         return self.pools
+
+    def _merge_pool_stub(self, candidate: Pool) -> None:
+        existing = self._pools_by_url.get(candidate.url)
+        if existing is None:
+            self._pools_by_url[candidate.url] = candidate
+            self.pools.append(candidate)
+            return
+
+        existing.add_pool_type(candidate.pool_type)
 
     # ------------------------------------------------------------------
     # Second pass: populate detail fields
@@ -295,6 +313,54 @@ def _parse_args() -> argparse.Namespace:
         action="store_true",
         help="Suppress console logs (equivalent to --log-level CRITICAL).",
     )
+    parser.add_argument(
+        "--write-api",
+        action="store_true",
+        help="Write scraped pools to the backend API using create/update upserts.",
+    )
+    parser.add_argument(
+        "--api-base-url",
+        default=os.environ.get("SCRAPER_API_BASE_URL", "http://localhost/pool-my-finger/src/backend/api"),
+        help="Backend API base URL (default: SCRAPER_API_BASE_URL or local API path).",
+    )
+    parser.add_argument(
+        "--api-username",
+        default=os.environ.get("SCRAPER_API_USERNAME"),
+        help="Backend API username (default: SCRAPER_API_USERNAME).",
+    )
+    parser.add_argument(
+        "--api-password",
+        default=os.environ.get("SCRAPER_API_PASSWORD"),
+        help="Backend API password (default: SCRAPER_API_PASSWORD).",
+    )
+    parser.add_argument(
+        "--api-timeout",
+        type=int,
+        default=20,
+        help="HTTP timeout in seconds for API requests (default: 20).",
+    )
+    parser.add_argument(
+        "--api-retries",
+        type=int,
+        default=2,
+        help="Retry attempts for transient API/network failures (default: 2).",
+    )
+    parser.add_argument(
+        "--dry-run-write",
+        action="store_true",
+        help="Compute API writes without mutating backend data.",
+    )
+    parser.add_argument(
+        "--type-aliases-file",
+        type=Path,
+        default=Path(__file__).with_name("type_aliases.json"),
+        help="JSON file mapping scraper type aliases to canonical pool type names.",
+    )
+    parser.add_argument(
+        "--continue-on-api-error",
+        action="store_true",
+        help="Continue processing remaining pools after API write failures.",
+    )
 
     args = parser.parse_args()
 
@@ -302,6 +368,12 @@ def _parse_args() -> argparse.Namespace:
         parser.error("--max-pages must be >= 1")
     if args.workers < 1:
         parser.error("--workers must be >= 1")
+    if args.api_timeout < 1:
+        parser.error("--api-timeout must be >= 1")
+    if args.api_retries < 0:
+        parser.error("--api-retries must be >= 0")
+    if args.write_api and (not args.api_username or not args.api_password):
+        parser.error("--write-api requires --api-username and --api-password (or env vars)")
 
     return args
 
@@ -395,10 +467,21 @@ def _pool_to_dict(pool: Pool) -> dict[str, Any]:
         f"{digits[0:3]}-{digits[3:6]}-{digits[6:10]}" if len(digits) == 10 else (digits[:12] or None)
     )
 
+    pool_types = pool.pool_types if pool.pool_types else [pool.pool_type]
+    primary_type = pool_types[0]
+
     return {
         "name": pool.name,
-        "pool_type": str(pool.pool_type),
-        "pool_type_name": pool.pool_type.name,
+        "pool_type": str(primary_type),
+        "pool_type_name": primary_type.name,
+        "pool_types": [
+            {
+                "code": str(pool_type),
+                "name": pool_type.name,
+                "description": pool_type.description,
+            }
+            for pool_type in pool_types
+        ],
         "url": pool.url,
         "address": pool.address,
         "primary_image_url": pool.primary_image_url,
@@ -409,8 +492,12 @@ def _pool_to_dict(pool: Pool) -> dict[str, Any]:
         "is_active": pool.is_active,
         "schedules": [_schedule_to_dict(s) for s in pool.schedules],
         "db_record": {
-            "pool_type_name": (pool.pool_type.name or "Unknown")[:50],
-            "pool_type_description": (str(pool.pool_type) or "")[:255] or None,
+            "pool_type_name": (primary_type.name or "Unknown")[:50],
+            "pool_type_description": (str(primary_type) or "")[:255] or None,
+            "pool_type_names": [
+                (pool_type.name or "Unknown")[:50]
+                for pool_type in pool_types
+            ],
             "name": (pool.name or "Unknown Pool")[:255],
             "full_address": pool.address or None,
             "primary_image_url": pool.primary_image_url or None,
@@ -421,6 +508,183 @@ def _pool_to_dict(pool: Pool) -> dict[str, Any]:
             "schedules": [_schedule_to_dict(s) for s in pool.schedules],
         },
     }
+
+
+def _normalize_text(value: str | None) -> str:
+    if not value:
+        return ""
+    return " ".join(value.strip().lower().split())
+
+
+def _pool_identity_key(name: str | None, address: str | None) -> str:
+    return f"{_normalize_text(name)}|{_normalize_text(address)}"
+
+
+def _load_type_aliases(path: Path | None) -> dict[str, str]:
+    aliases: dict[str, str] = {}
+
+    for code, name in TYPES.items():
+        aliases[_normalize_text(code)] = name
+        aliases[_normalize_text(name)] = name
+
+    if path is None or not path.exists():
+        return aliases
+
+    with path.open("r", encoding="utf-8") as f:
+        payload = json.load(f)
+
+    if not isinstance(payload, dict):
+        raise ValueError("Type aliases file must contain a JSON object")
+
+    for alias, canonical in payload.items():
+        if not isinstance(alias, str) or not isinstance(canonical, str):
+            continue
+        aliases[_normalize_text(alias)] = canonical
+
+    return aliases
+
+
+def _extract_canonical_type_names(pool: Pool, aliases: dict[str, str]) -> list[str]:
+    extracted: list[str] = []
+    pool_types = pool.pool_types if pool.pool_types else [pool.pool_type]
+
+    for pool_type in pool_types:
+        candidates = [str(pool_type), pool_type.name]
+        for candidate in candidates:
+            key = _normalize_text(candidate)
+            if not key:
+                continue
+            canonical = aliases.get(key, candidate)
+            normalized = canonical.strip()
+            if normalized and normalized not in extracted:
+                extracted.append(normalized)
+
+    return extracted
+
+
+def _extract_lat_lon(geo_location: str) -> tuple[float | None, float | None]:
+    parts = geo_location.split(":")
+    if len(parts) != 2:
+        return None, None
+
+    try:
+        return float(parts[0]), float(parts[1])
+    except ValueError:
+        return None, None
+
+
+def _pool_to_api_payload(pool: Pool, type_ids: list[int]) -> dict[str, Any]:
+    latitude, longitude = _extract_lat_lon(pool.geo_location)
+    return {
+        "name": pool.name,
+        "address": pool.address or None,
+        "imageUrl": pool.primary_image_url or None,
+        "website": pool.url or None,
+        "map": pool.map_link or None,
+        "latitude": latitude,
+        "longitude": longitude,
+        "phone": pool.phone or None,
+        "active": bool(pool.is_active),
+        "typeIds": type_ids,
+    }
+
+
+def _build_existing_pool_index(existing_pools: list[dict[str, Any]]) -> dict[str, dict[str, Any]]:
+    indexed: dict[str, dict[str, Any]] = {}
+    for existing in existing_pools:
+        name = existing.get("name")
+        address = existing.get("address")
+        if not isinstance(name, str):
+            continue
+        key = _pool_identity_key(name, address if isinstance(address, str) else None)
+        indexed[key] = existing
+    return indexed
+
+
+def _write_pools_to_api(
+    pools: list[Pool],
+    client: ScraperApiClient,
+    aliases: dict[str, str],
+    dry_run: bool,
+    fail_fast: bool,
+) -> dict[str, int]:
+    type_records = client.get_pool_types()
+    type_ids_by_name: dict[str, int] = {
+        _normalize_text(pool_type.name): pool_type.id
+        for pool_type in type_records
+    }
+
+    existing_index = _build_existing_pool_index(client.get_pools())
+    summary = {
+        "created": 0,
+        "updated": 0,
+        "skipped_missing_type": 0,
+        "failed_api": 0,
+    }
+
+    for pool in pools:
+        canonical_names = _extract_canonical_type_names(pool, aliases)
+        if not canonical_names:
+            summary["skipped_missing_type"] += 1
+            logger.error("Skipping '%s' because no pool types were extracted.", pool.name)
+            continue
+
+        unresolved = [
+            name
+            for name in canonical_names
+            if _normalize_text(name) not in type_ids_by_name
+        ]
+        if unresolved:
+            summary["skipped_missing_type"] += 1
+            logger.error(
+                "Skipping '%s' because pool type(s) do not exist in API: %s",
+                pool.name,
+                ", ".join(unresolved),
+            )
+            continue
+
+        resolved_type_ids = [type_ids_by_name[_normalize_text(name)] for name in canonical_names]
+        payload = _pool_to_api_payload(pool, resolved_type_ids)
+        identity_key = _pool_identity_key(pool.name, pool.address)
+        existing = existing_index.get(identity_key)
+
+        try:
+            if existing is None:
+                if dry_run:
+                    summary["created"] += 1
+                    logger.info("DRY RUN create: %s", pool.name)
+                    continue
+
+                created = client.create_pool(payload)
+                created_id = created.get("id") if isinstance(created, dict) else None
+                if isinstance(created_id, int):
+                    existing_index[identity_key] = created
+                summary["created"] += 1
+                logger.info("Created pool via API: %s", pool.name)
+                continue
+
+            existing_id = existing.get("id") if isinstance(existing, dict) else None
+            if not isinstance(existing_id, int):
+                raise RuntimeError(
+                    f"Existing pool is missing a valid numeric id for key {identity_key}"
+                )
+
+            if dry_run:
+                summary["updated"] += 1
+                logger.info("DRY RUN update: %s (id=%s)", pool.name, existing_id)
+                continue
+
+            updated = client.update_pool(existing_id, payload)
+            existing_index[identity_key] = updated
+            summary["updated"] += 1
+            logger.info("Updated pool via API: %s (id=%s)", pool.name, existing_id)
+        except Exception as exc:
+            summary["failed_api"] += 1
+            logger.error("API write failed for '%s': %s", pool.name, exc)
+            if fail_fast:
+                raise
+
+    return summary
 
 
 def _write_json_output(path: Path, pools: list[Pool], pretty: bool) -> None:
@@ -456,3 +720,27 @@ if __name__ == "__main__":
 
     if args.output_json is not None:
         _write_json_output(args.output_json, scraper.pools, args.pretty_json)
+
+    if args.write_api:
+        type_aliases = _load_type_aliases(args.type_aliases_file)
+        api_client = ScraperApiClient(
+            base_url=args.api_base_url,
+            username=args.api_username,
+            password=args.api_password,
+            timeout=args.api_timeout,
+            retries=args.api_retries,
+        )
+        summary = _write_pools_to_api(
+            pools=scraper.pools,
+            client=api_client,
+            aliases=type_aliases,
+            dry_run=args.dry_run_write,
+            fail_fast=not args.continue_on_api_error,
+        )
+        logger.info(
+            "API sync summary: created=%s updated=%s skipped_missing_type=%s failed_api=%s",
+            summary["created"],
+            summary["updated"],
+            summary["skipped_missing_type"],
+            summary["failed_api"],
+        )
