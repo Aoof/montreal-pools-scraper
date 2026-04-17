@@ -28,6 +28,26 @@ logger = get_logger("scraper")
 _thread_local = threading.local()
 
 
+def _load_local_env(env_path: Path) -> None:
+    """Load key=value pairs from a local .env file into process environment."""
+    if not env_path.exists():
+        return
+
+    for raw_line in env_path.read_text(encoding="utf-8").splitlines():
+        line = raw_line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+
+        key, value = line.split("=", 1)
+        key = key.strip()
+        value = value.strip().strip('"').strip("'")
+        if key and key not in os.environ:
+            os.environ[key] = value
+
+
+_load_local_env(Path(__file__).with_name(".env"))
+
+
 class PoolMyFingerScraper:
     # Selectors
 
@@ -320,7 +340,7 @@ def _parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--api-base-url",
-        default=os.environ.get("SCRAPER_API_BASE_URL", "http://localhost/pool-my-finger/src/backend/api"),
+        default=os.environ.get("SCRAPER_API_BASE_URL", "http://localhost/pool-my-finger/api"),
         help="Backend API base URL (default: SCRAPER_API_BASE_URL or local API path).",
     )
     parser.add_argument(
@@ -466,6 +486,7 @@ def _pool_to_dict(pool: Pool) -> dict[str, Any]:
     normalized_phone = (
         f"{digits[0:3]}-{digits[3:6]}-{digits[6:10]}" if len(digits) == 10 else (digits[:12] or None)
     )
+    latitude, longitude = _extract_lat_lon(pool.geo_location)
 
     pool_types = pool.pool_types if pool.pool_types else [pool.pool_type]
     primary_type = pool_types[0]
@@ -487,6 +508,8 @@ def _pool_to_dict(pool: Pool) -> dict[str, Any]:
         "primary_image_url": pool.primary_image_url,
         "map_link": pool.map_link,
         "geo_location": pool.geo_location,
+        "latitude": latitude,
+        "longitude": longitude,
         "phone": pool.phone,
         "created_at": pool.createdAt,
         "is_active": pool.is_active,
@@ -503,6 +526,8 @@ def _pool_to_dict(pool: Pool) -> dict[str, Any]:
             "primary_image_url": pool.primary_image_url or None,
             "website": pool.url or None,
             "map_link": pool.map_link or None,
+            "latt": latitude,
+            "longt": longitude,
             "phone": normalized_phone,
             "is_active": 1 if pool.is_active else 0,
             "schedules": [_schedule_to_dict(s) for s in pool.schedules],
@@ -583,6 +608,8 @@ def _pool_to_api_payload(pool: Pool, type_ids: list[int]) -> dict[str, Any]:
         "map": pool.map_link or None,
         "latitude": latitude,
         "longitude": longitude,
+        "latt": latitude,
+        "longt": longitude,
         "phone": pool.phone or None,
         "active": bool(pool.is_active),
         "typeIds": type_ids,
